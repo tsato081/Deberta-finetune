@@ -16,7 +16,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.metrics import accuracy_score, f1_score
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
+from tqdm import tqdm
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from transformers import AutoModel, AutoTokenizer, get_linear_schedule_with_warmup, set_seed
 
@@ -319,16 +320,18 @@ def train_one_epoch(
     device: torch.device,
     cfg: Config,
     scaler: GradScaler | None,
+    epoch: int,
+    max_epochs: int,
 ) -> float:
     model.train()
     total_loss = 0.0
-    for batch in loader:
+    for batch in tqdm(loader, desc=f"train {epoch + 1}/{max_epochs}", leave=False):
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         labels_t1 = batch["labels_t1"].to(device)
         labels_t2 = batch["labels_t2"].to(device)
 
-        with autocast(enabled=cfg.use_amp and device.type == "cuda"):
+        with autocast(device_type="cuda", enabled=cfg.use_amp):
             logits_t1, logits_t2 = model(input_ids, attention_mask)
 
             loss_t1 = logits_t1.new_tensor(0.0)
@@ -366,13 +369,16 @@ def train_one_epoch(
 
         optimizer.zero_grad()
         if scaler is not None:
+            scale_before = scaler.get_scale()
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
+            if scaler.get_scale() >= scale_before:
+                scheduler.step()
         else:
             loss.backward()
             optimizer.step()
-        scheduler.step()
+            scheduler.step()
 
         total_loss += float(loss.item())
     return total_loss / max(len(loader), 1)
@@ -386,7 +392,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> Dict
     t2_labels: List[int] = []
     t2_preds: List[int] = []
 
-    for batch in loader:
+    for batch in tqdm(loader, desc="eval", leave=False):
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         labels_t1 = batch["labels_t1"].to(device)
@@ -446,15 +452,17 @@ def train_and_eval(cfg: Config, run_dir: Path, save_best_path: Path | None = Non
     warmup_steps = int(total_steps * cfg.warmup_ratio)
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
 
-    scaler = GradScaler() if cfg.use_amp else None
+    scaler = GradScaler("cuda") if cfg.use_amp else None
 
     best_score = -1.0
     best_metrics = {}
     patience = 0
 
     metrics_path = run_dir / "metrics.jsonl"
-    for epoch in range(cfg.max_epochs):
-        train_loss = train_one_epoch(model, train_loader, optimizer, scheduler, device, cfg, scaler)
+    for epoch in tqdm(range(cfg.max_epochs), desc="epochs"):
+        train_loss = train_one_epoch(
+            model, train_loader, optimizer, scheduler, device, cfg, scaler, epoch, cfg.max_epochs
+        )
         metrics = evaluate(model, val_loader, device)
         score = metrics["task1_acc"] + metrics["task2_acc"]
 

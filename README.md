@@ -95,9 +95,7 @@ mkdir -p models/deberta_v3_mlm
 
 #### B) HuggingFace から落とす（スクリプト利用）
 ```bash
-uv run python utils/download_hf_model.py \
-  --repo-id teru00801/deberta-v3-mlm \
-  --local-dir models/deberta_v3_mlm
+uv run python download_mlm.py
 ```
 
 確認:
@@ -113,18 +111,7 @@ ls -la models/deberta_v3_mlm | head
 uv run python download_data.py
 ```
 
-#### B) ローカルから生成（必要なときのみ）
-```bash
-uv run python utils/pretrain_prepare.py \
-  --task1-in Data_for_deberta/processed/task1_v1/train.csv \
-  --task2-in Data_for_deberta/processed/task2_v1/train.csv \
-  --task1-out Data_for_deberta/processed/task1_ready/train.csv \
-  --task2-out Data_for_deberta/processed/task2_ready/train.csv \
-  --suspects-out outputs/suspects/task1_decline_but_task2_has_category.csv \
-  --task1-conflicts-out outputs/suspects/task1_label_conflicts.csv \
-  --replace-urls \
-  --drop-inconsistent-from-task1
-```
+#### B) ローカル生成は省略（クラウドは `download_data.py` のみでOK）
 
 ### 5) 学習（単発 / sweep）
 tmux 推奨:
