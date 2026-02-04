@@ -59,6 +59,10 @@ uv sync
 nvidia-smi | head -n 5
 
 # 2) 出たCUDAに合わせてインストール
+# nvidia-smi の CUDA 13.0 は「ドライバの最大対応」なので、
+# torch は cu128（CUDA 12.8 同梱）で問題なし
+uv pip install --index-url https://download.pytorch.org/whl/cu128 --upgrade torch torchvision torchaudio
+
 # CUDA 12.x → cu121
 uv pip install --index-url https://download.pytorch.org/whl/cu121 --upgrade torch torchvision torchaudio
 
