@@ -54,10 +54,18 @@ uv sync
 
 # GPU (A100/H100) 用 PyTorch をインストール
 # ※PyPIのtorchはCPU版になるため、必ず公式CUDA wheelを使う
-# CUDA 12.x系の環境なら cu121 を使う
+
+# 1) CUDAバージョン確認
+nvidia-smi | head -n 5
+
+# 2) 出たCUDAに合わせてインストール
+# CUDA 12.x → cu121
 uv pip install --index-url https://download.pytorch.org/whl/cu121 --upgrade torch torchvision torchaudio
 
-# 動作確認（GPUを認識しているか）
+# CUDA 11.8 → cu118
+# uv pip install --index-url https://download.pytorch.org/whl/cu118 --upgrade torch torchvision torchaudio
+
+# 3) 動作確認（GPUを認識しているか）
 python - <<'PY'
 import torch
 print("torch", torch.__version__)
