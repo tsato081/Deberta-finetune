@@ -1,0 +1,20 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.env
+
+Data_for_deberta
+docs
+models/
+outputs/
+AGENTS.md
+CLAUDE.md
+
+utils/
