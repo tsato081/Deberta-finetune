@@ -204,24 +204,26 @@ class MultiTaskDataset(Dataset):
             return_tensors="pt",
         )
 
-        pick = row.get("pick", "")
-        label_t1 = -100
-        if pick == "Pick":
-            label_t1 = 1
-        elif pick == "Decline":
-            label_t1 = 0
-
         cat = row.get("category", "")
         label_t2 = -100
         if isinstance(cat, str) and cat in self.label2id:
             label_t2 = self.label2id[cat]
+        is_task1_only = isinstance(cat, str) and cat == ""
+
+        pick = row.get("pick", "")
+        label_t1 = -100
+        if is_task1_only:
+            if pick == "Pick":
+                label_t1 = 1
+            elif pick == "Decline":
+                label_t1 = 0
 
         return {
             "input_ids": enc["input_ids"].squeeze(0),
             "attention_mask": enc["attention_mask"].squeeze(0),
             "labels_t1": torch.tensor(label_t1, dtype=torch.long),
             "labels_t2": torch.tensor(label_t2, dtype=torch.long),
-            "is_task1_only": torch.tensor(1 if (isinstance(cat, str) and cat == "") else 0, dtype=torch.long),
+            "is_task1_only": torch.tensor(1 if is_task1_only else 0, dtype=torch.long),
         }
 
 
