@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def find_latest_b_sweep(sweep_root: Path) -> tuple[Path, Dict[str, str]]:
+def find_latest_b_trial(sweep_root: Path) -> tuple[Path, Path, Dict[str, str]]:
     for sweep_dir in sorted(sweep_root.glob("sweep_*"), reverse=True):
         summary_path = sweep_dir / "summary.csv"
         if not summary_path.exists():
@@ -51,8 +51,43 @@ def find_latest_b_sweep(sweep_root: Path) -> tuple[Path, Dict[str, str]]:
                     best_score = score
                     best_row = row
         if best_row is not None:
-            return sweep_dir, best_row
+            trial_id = int(float(best_row["trial"]))
+            trial_dirs = sorted(sweep_dir.glob(f"trial_{trial_id:02d}_B_*"))
+            if not trial_dirs:
+                return sweep_dir, sweep_dir, best_row
+            return sweep_dir, trial_dirs[0], best_row
     raise FileNotFoundError("No sweep with stage B rows found under outputs/train_runs")
+
+
+def read_json(path: Path) -> Dict[str, object]:
+    with open(path) as f:
+        return json.load(f)
+
+
+def resolve_config(sweep_dir: Path, b_trial_dir: Path) -> Dict[str, object]:
+    if (b_trial_dir / "config.json").exists():
+        return read_json(b_trial_dir / "config.json")
+    if (sweep_dir / "best_config.json").exists():
+        return read_json(sweep_dir / "best_config.json")
+    if (sweep_dir / "config.json").exists():
+        return read_json(sweep_dir / "config.json")
+    raise FileNotFoundError("config not found in B trial dir or sweep dir")
+
+
+def resolve_label_map(sweep_dir: Path, b_trial_dir: Path) -> Dict[str, int]:
+    if (b_trial_dir / "label_map.json").exists():
+        return read_json(b_trial_dir / "label_map.json")
+    if (sweep_dir / "label_map.json").exists():
+        return read_json(sweep_dir / "label_map.json")
+    raise FileNotFoundError("label_map.json not found in B trial dir or sweep dir")
+
+
+def resolve_model_path(sweep_dir: Path, b_trial_dir: Path) -> Path:
+    if (b_trial_dir / "best_model.pt").exists():
+        return b_trial_dir / "best_model.pt"
+    if (sweep_dir / "best_model.pt").exists():
+        return sweep_dir / "best_model.pt"
+    raise FileNotFoundError("best_model.pt not found in B trial dir or sweep dir")
 
 
 def pick_text_columns(df: pd.DataFrame) -> tuple[str, str]:
@@ -157,11 +192,10 @@ def evaluate_one_file(model: torch.nn.Module, loader: DataLoader, device: torch.
 def main() -> None:
     args = parse_args()
 
-    sweep_dir, best_b_row = find_latest_b_sweep(args.sweep_root)
-    with open(sweep_dir / "best_config.json") as f:
-        best_cfg = json.load(f)
-    with open(sweep_dir / "label_map.json") as f:
-        label2id = json.load(f)
+    sweep_dir, b_trial_dir, best_b_row = find_latest_b_trial(args.sweep_root)
+    best_cfg = resolve_config(sweep_dir, b_trial_dir)
+    label2id = resolve_label_map(sweep_dir, b_trial_dir)
+    model_path = resolve_model_path(sweep_dir, b_trial_dir)
 
     model_dir = Path(best_cfg["model_dir"])
     max_length = int(best_cfg.get("max_length", 384))
@@ -173,7 +207,7 @@ def main() -> None:
 
     model = DebertaMultiTask(str(model_dir), num_task2=len(label2id))
     model.encoder.resize_token_embeddings(len(tokenizer))
-    state = torch.load(sweep_dir / "best_model.pt", map_location=device)
+    state = torch.load(model_path, map_location=device)
     model.load_state_dict(state)
     model.to(device)
 
@@ -191,6 +225,8 @@ def main() -> None:
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "selected_sweep_dir": str(sweep_dir),
+        "selected_b_trial_dir": str(b_trial_dir),
+        "selected_model_path": str(model_path),
         "selected_b_trial": best_b_row,
         "device": str(device),
         "reports": test_reports,
