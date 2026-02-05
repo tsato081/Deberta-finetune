@@ -76,6 +76,7 @@ def parse_args(cfg: Config) -> argparse.Namespace:
     parser.add_argument("--rdrop-alpha-task2", type=float, default=cfg.rdrop_alpha_task2)
     parser.add_argument("--use-amp", action="store_true")
     parser.add_argument("--sweep", action="store_true")
+    parser.add_argument("--sweep-stage", type=str, default="AB", choices=["A", "B", "AB"])
     return parser.parse_args()
 
 
@@ -528,7 +529,7 @@ def run_single(cfg: Config) -> None:
     train_and_eval(cfg, run_dir)
 
 
-def run_sweep(cfg: Config) -> None:
+def run_sweep(cfg: Config, sweep_stage: str) -> None:
     sweep_dir = cfg.output_dir / f"sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     sweep_dir.mkdir(parents=True, exist_ok=True)
 
@@ -542,55 +543,25 @@ def run_sweep(cfg: Config) -> None:
     global_best_cfg = None
     global_best_path = sweep_dir / "best_model.pt"
 
-    stage_a_lrs = [1.5e-5, 2.0e-5, 3.0e-5]
-    stage_a_boost = [0.8, 1.0, 1.2]
-    stage_a_trials = []
-    for lr in stage_a_lrs:
-        for boost in stage_a_boost:
-            stage_a_trials.append((lr, boost))
-
     best_a = None
     trial_id = 0
-    for lr, boost in stage_a_trials:
-        trial_id += 1
-        trial_dir = sweep_dir / f"trial_{trial_id:02d}_A_lr{lr}_boost{boost}"
-        trial_dir.mkdir(parents=True, exist_ok=True)
-        trial_cfg = Config(**asdict(cfg))
-        trial_cfg.learning_rate = lr
-        trial_cfg.boost_mult = boost
-        trial_cfg.focal_gamma_task1 = 0.0
-        trial_cfg.rdrop_alpha_task2 = 0.2
-        with open(trial_dir / "config.json", "w") as f:
-            json.dump({k: str(v) if isinstance(v, Path) else v for k, v in asdict(trial_cfg).items()}, f, ensure_ascii=False, indent=2)
+    if sweep_stage in {"A", "AB"}:
+        stage_a_lrs = [1.5e-5, 2.0e-5, 3.0e-5]
+        stage_a_boost = [0.8, 1.0, 1.2]
+        stage_a_trials = []
+        for lr in stage_a_lrs:
+            for boost in stage_a_boost:
+                stage_a_trials.append((lr, boost))
 
-        metrics = train_and_eval(trial_cfg, trial_dir, save_best_path=global_best_path)
-        score = metrics.get("score", 0.0)
-        if score > global_best:
-            global_best = score
-            global_best_cfg = asdict(trial_cfg)
-        if best_a is None or score > best_a["score"]:
-            best_a = {"lr": lr, "boost": boost, "score": score}
-
-        with open(summary_path, "a") as f:
-            f.write(
-                f"A,{trial_id},{lr},{boost},0.0,0.2,{metrics.get('task1_acc_task1only',0.0)},{metrics.get('task1_acc',0.0)},{metrics.get('task2_acc',0.0)},{score},{metrics.get('epoch',0)}\n"
-            )
-
-    stage_b_gamma = [0.0, 1.0, 2.0]
-    stage_b_rdrop = [0.1, 0.2, 0.3]
-
-    for gamma in stage_b_gamma:
-        for rdrop in stage_b_rdrop:
+        for lr, boost in stage_a_trials:
             trial_id += 1
-            lr = best_a["lr"]
-            boost = best_a["boost"]
-            trial_dir = sweep_dir / f"trial_{trial_id:02d}_B_gamma{gamma}_rdrop{rdrop}"
+            trial_dir = sweep_dir / f"trial_{trial_id:02d}_A_lr{lr}_boost{boost}"
             trial_dir.mkdir(parents=True, exist_ok=True)
             trial_cfg = Config(**asdict(cfg))
             trial_cfg.learning_rate = lr
             trial_cfg.boost_mult = boost
-            trial_cfg.focal_gamma_task1 = gamma
-            trial_cfg.rdrop_alpha_task2 = rdrop
+            trial_cfg.focal_gamma_task1 = 0.0
+            trial_cfg.rdrop_alpha_task2 = 0.2
             with open(trial_dir / "config.json", "w") as f:
                 json.dump({k: str(v) if isinstance(v, Path) else v for k, v in asdict(trial_cfg).items()}, f, ensure_ascii=False, indent=2)
 
@@ -599,11 +570,46 @@ def run_sweep(cfg: Config) -> None:
             if score > global_best:
                 global_best = score
                 global_best_cfg = asdict(trial_cfg)
+            if best_a is None or score > best_a["score"]:
+                best_a = {"lr": lr, "boost": boost, "score": score}
 
             with open(summary_path, "a") as f:
                 f.write(
-                    f"B,{trial_id},{lr},{boost},{gamma},{rdrop},{metrics.get('task1_acc_task1only',0.0)},{metrics.get('task1_acc',0.0)},{metrics.get('task2_acc',0.0)},{score},{metrics.get('epoch',0)}\n"
+                    f"A,{trial_id},{lr},{boost},0.0,0.2,{metrics.get('task1_acc_task1only',0.0)},{metrics.get('task1_acc',0.0)},{metrics.get('task2_acc',0.0)},{score},{metrics.get('epoch',0)}\n"
                 )
+
+    stage_b_gamma = [0.0, 1.0, 2.0]
+    stage_b_rdrop = [0.1, 0.2, 0.3]
+
+    if sweep_stage in {"B", "AB"}:
+        if best_a is None:
+            best_a = {"lr": cfg.learning_rate, "boost": cfg.boost_mult, "score": None}
+
+        for gamma in stage_b_gamma:
+            for rdrop in stage_b_rdrop:
+                trial_id += 1
+                lr = best_a["lr"]
+                boost = best_a["boost"]
+                trial_dir = sweep_dir / f"trial_{trial_id:02d}_B_gamma{gamma}_rdrop{rdrop}"
+                trial_dir.mkdir(parents=True, exist_ok=True)
+                trial_cfg = Config(**asdict(cfg))
+                trial_cfg.learning_rate = lr
+                trial_cfg.boost_mult = boost
+                trial_cfg.focal_gamma_task1 = gamma
+                trial_cfg.rdrop_alpha_task2 = rdrop
+                with open(trial_dir / "config.json", "w") as f:
+                    json.dump({k: str(v) if isinstance(v, Path) else v for k, v in asdict(trial_cfg).items()}, f, ensure_ascii=False, indent=2)
+
+                metrics = train_and_eval(trial_cfg, trial_dir, save_best_path=global_best_path)
+                score = metrics.get("score", 0.0)
+                if score > global_best:
+                    global_best = score
+                    global_best_cfg = asdict(trial_cfg)
+
+                with open(summary_path, "a") as f:
+                    f.write(
+                        f"B,{trial_id},{lr},{boost},{gamma},{rdrop},{metrics.get('task1_acc_task1only',0.0)},{metrics.get('task1_acc',0.0)},{metrics.get('task2_acc',0.0)},{score},{metrics.get('epoch',0)}\n"
+                    )
 
     if global_best_cfg is not None:
         with open(sweep_dir / "best_config.json", "w") as f:
@@ -634,7 +640,7 @@ def main() -> None:
     cfg.use_amp = args.use_amp or cfg.use_amp
 
     if args.sweep:
-        run_sweep(cfg)
+        run_sweep(cfg, args.sweep_stage)
     else:
         run_single(cfg)
 
