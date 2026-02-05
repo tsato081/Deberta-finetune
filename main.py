@@ -579,11 +579,34 @@ def run_sweep(cfg: Config, sweep_stage: str) -> None:
                 )
 
     stage_b_gamma = [0.0, 1.0, 2.0]
-    stage_b_rdrop = [0.1, 0.2, 0.3]
+    stage_b_rdrop = [0.3, 0.7]
 
     if sweep_stage in {"B", "AB"}:
         if best_a is None:
-            best_a = {"lr": cfg.learning_rate, "boost": cfg.boost_mult, "score": None}
+            latest = None
+            for prev in sorted(cfg.output_dir.glob("sweep_*"), reverse=True):
+                if prev == sweep_dir:
+                    continue
+                summary = prev / "summary.csv"
+                if not summary.exists():
+                    continue
+                with open(summary) as f:
+                    header = f.readline().strip().split(",")
+                    if "stage" not in header or "learning_rate" not in header or "boost_mult" not in header or "score" not in header:
+                        continue
+                    idx = {k: i for i, k in enumerate(header)}
+                    for line in f:
+                        parts = line.strip().split(",")
+                        if not parts or parts[idx["stage"]] != "A":
+                            continue
+                        score = float(parts[idx["score"]])
+                        lr = float(parts[idx["learning_rate"]])
+                        boost = float(parts[idx["boost_mult"]])
+                        if (latest is None) or (score > latest["score"]):
+                            latest = {"lr": lr, "boost": boost, "score": score}
+                if latest is not None:
+                    break
+            best_a = latest or {"lr": cfg.learning_rate, "boost": cfg.boost_mult, "score": None}
 
         for gamma in stage_b_gamma:
             for rdrop in stage_b_rdrop:

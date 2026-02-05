@@ -137,3 +137,14 @@ uv run python main.py \
   --output-dir outputs/train_runs \
   --sweep
 ```
+
+Stage Aのみ:
+```bash
+uv run python main.py --sweep --sweep-stage A
+```
+
+Stage Bのみ（最新sweepのAベストを自動利用）:
+```bash
+uv run python main.py --sweep --sweep-stage B
+```
+※ Stage Aを途中で止めても、`summary.csv`内のAベストを自動で拾ってBに入る
