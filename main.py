@@ -221,6 +221,7 @@ class MultiTaskDataset(Dataset):
             "attention_mask": enc["attention_mask"].squeeze(0),
             "labels_t1": torch.tensor(label_t1, dtype=torch.long),
             "labels_t2": torch.tensor(label_t2, dtype=torch.long),
+            "is_task1_only": torch.tensor(1 if (isinstance(cat, str) and cat == "") else 0, dtype=torch.long),
         }
 
 
@@ -258,11 +259,12 @@ def build_sampler(df: pd.DataFrame, boost_mult: float) -> WeightedRandomSampler:
     n_task1 = int(task1_mask.sum())
     n_task2 = int(task2_mask.sum())
     task2_boost = (n_task1 / n_task2) * boost_mult if n_task2 > 0 else 1.0
+    per_class_total = (n_task1 / len(pick_cnt)) if pick_cnt else 1.0
 
     def w_pick(p: str) -> float:
-        if not p:
+        if (not p) or (not pick_cnt):
             return 1.0
-        return 1.0 / max(pick_cnt.get(p, 1), 1)
+        return per_class_total / max(pick_cnt.get(p, 1), 1)
 
     def w_cat(c: str) -> float:
         if not c:
@@ -389,6 +391,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> Dict
     model.eval()
     t1_labels: List[int] = []
     t1_preds: List[int] = []
+    t1_is_task1_only: List[int] = []
     t2_labels: List[int] = []
     t2_preds: List[int] = []
 
@@ -397,6 +400,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> Dict
         attention_mask = batch["attention_mask"].to(device)
         labels_t1 = batch["labels_t1"].to(device)
         labels_t2 = batch["labels_t2"].to(device)
+        is_task1_only = batch["is_task1_only"].to(device)
 
         logits_t1, logits_t2 = model(input_ids, attention_mask)
         pred_t1 = logits_t1.argmax(dim=-1)
@@ -406,18 +410,29 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> Dict
         if mask_t1.any():
             t1_labels.extend(labels_t1[mask_t1].cpu().tolist())
             t1_preds.extend(pred_t1[mask_t1].cpu().tolist())
+            t1_is_task1_only.extend(is_task1_only[mask_t1].cpu().tolist())
 
         mask_t2 = labels_t2 != -100
         if mask_t2.any():
             t2_labels.extend(labels_t2[mask_t2].cpu().tolist())
             t2_preds.extend(pred_t2[mask_t2].cpu().tolist())
 
-    t1 = compute_metrics(t1_labels, t1_preds)
+    t1_all = compute_metrics(t1_labels, t1_preds)
+    t1_task1only_labels = [y for y, m in zip(t1_labels, t1_is_task1_only) if m == 1]
+    t1_task1only_preds = [y for y, m in zip(t1_preds, t1_is_task1_only) if m == 1]
+    t1_task1only = compute_metrics(t1_task1only_labels, t1_task1only_preds)
     t2 = {
         "acc": float(accuracy_score(t2_labels, t2_preds)) if t2_labels else 0.0,
         "f1": float(f1_score(t2_labels, t2_preds, average="macro")) if t2_labels else 0.0,
     }
-    return {"task1_acc": t1["acc"], "task1_f1": t1["f1"], "task2_acc": t2["acc"], "task2_f1": t2["f1"]}
+    return {
+        "task1_acc": t1_all["acc"],
+        "task1_f1": t1_all["f1"],
+        "task1_acc_task1only": t1_task1only["acc"],
+        "task1_f1_task1only": t1_task1only["f1"],
+        "task2_acc": t2["acc"],
+        "task2_f1": t2["f1"],
+    }
 
 
 def train_and_eval(cfg: Config, run_dir: Path, save_best_path: Path | None = None) -> Dict[str, float]:
@@ -464,7 +479,8 @@ def train_and_eval(cfg: Config, run_dir: Path, save_best_path: Path | None = Non
             model, train_loader, optimizer, scheduler, device, cfg, scaler, epoch, cfg.max_epochs
         )
         metrics = evaluate(model, val_loader, device)
-        score = metrics["task1_acc"] + metrics["task2_acc"]
+        task1_acc_for_score = metrics.get("task1_acc_task1only", metrics.get("task1_acc", 0.0))
+        score = task1_acc_for_score + metrics.get("task2_acc", 0.0)
 
         with open(metrics_path, "a") as f:
             f.write(
@@ -473,6 +489,7 @@ def train_and_eval(cfg: Config, run_dir: Path, save_best_path: Path | None = Non
                         "epoch": epoch + 1,
                         "train_loss": train_loss,
                         **metrics,
+                        "task1_acc_for_score": task1_acc_for_score,
                         "score": score,
                     },
                     ensure_ascii=False,
@@ -482,7 +499,7 @@ def train_and_eval(cfg: Config, run_dir: Path, save_best_path: Path | None = Non
 
         if score > best_score:
             best_score = score
-            best_metrics = {**metrics, "score": score, "epoch": epoch + 1}
+            best_metrics = {**metrics, "task1_acc_for_score": task1_acc_for_score, "score": score, "epoch": epoch + 1}
             if save_best_path is not None:
                 torch.save(model.state_dict(), save_best_path)
             else:
@@ -516,7 +533,7 @@ def run_sweep(cfg: Config) -> None:
     summary_path = sweep_dir / "summary.csv"
     with open(summary_path, "w") as f:
         f.write(
-            "stage,trial,learning_rate,boost_mult,focal_gamma_task1,rdrop_alpha_task2,task1_acc,task2_acc,score,epoch\n"
+            "stage,trial,learning_rate,boost_mult,focal_gamma_task1,rdrop_alpha_task2,task1_acc_task1only,task1_acc,task2_acc,score,epoch\n"
         )
 
     global_best = -1.0
@@ -554,7 +571,7 @@ def run_sweep(cfg: Config) -> None:
 
         with open(summary_path, "a") as f:
             f.write(
-                f"A,{trial_id},{lr},{boost},0.0,0.2,{metrics.get('task1_acc',0.0)},{metrics.get('task2_acc',0.0)},{score},{metrics.get('epoch',0)}\n"
+                f"A,{trial_id},{lr},{boost},0.0,0.2,{metrics.get('task1_acc_task1only',0.0)},{metrics.get('task1_acc',0.0)},{metrics.get('task2_acc',0.0)},{score},{metrics.get('epoch',0)}\n"
             )
 
     stage_b_gamma = [0.0, 1.0, 2.0]
@@ -583,7 +600,7 @@ def run_sweep(cfg: Config) -> None:
 
             with open(summary_path, "a") as f:
                 f.write(
-                    f"B,{trial_id},{lr},{boost},{gamma},{rdrop},{metrics.get('task1_acc',0.0)},{metrics.get('task2_acc',0.0)},{score},{metrics.get('epoch',0)}\n"
+                    f"B,{trial_id},{lr},{boost},{gamma},{rdrop},{metrics.get('task1_acc_task1only',0.0)},{metrics.get('task1_acc',0.0)},{metrics.get('task2_acc',0.0)},{score},{metrics.get('epoch',0)}\n"
                 )
 
     if global_best_cfg is not None:
