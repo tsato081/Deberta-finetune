@@ -148,3 +148,54 @@ Stage Bのみ（最新sweepのAベストを自動利用）:
 uv run python main.py --sweep --sweep-stage B
 ```
 ※ Stage Aを途中で止めても、`summary.csv`内のAベストを自動で拾ってBに入る
+
+### 6) エクスポート後ファイルの意味（`upload_best_safetensors.py`）
+
+エクスポート先:
+```bash
+outputs/hf_export_deberta-20260206
+```
+
+主なファイル:
+```bash
+outputs/hf_export_deberta-20260206/best_model.safetensors
+```
+上記はファインチューニング済みの重み（Task1/Task2ヘッドを含む）。
+
+```bash
+outputs/hf_export_deberta-20260206/base_model/
+```
+上記はベースモデル一式（トークナイザ・HFモデル設定など）。
+
+```bash
+outputs/hf_export_deberta-20260206/base_model/config.json
+```
+上記はHFモデル定義用のconfig（モデル構造の設定）。
+
+```bash
+outputs/hf_export_deberta-20260206/config.json
+```
+上記は学習時の実験設定（`max_length`, `title_empty_token`, `learning_rate` など）。
+
+```bash
+outputs/hf_export_deberta-20260206/label_map.json
+```
+上記はTask2カテゴリのIDマップ（推論時に必須）。
+
+```bash
+outputs/hf_export_deberta-20260206/selected_b_trial.json
+```
+上記はどのB trialを選んだかの監査情報。
+
+```bash
+outputs/hf_export_deberta-20260206/summary.csv
+```
+上記はsweep結果一覧（存在する場合のみ同梱）。
+
+推論で最低限使うセット:
+```bash
+outputs/hf_export_deberta-20260206/best_model.safetensors
+outputs/hf_export_deberta-20260206/label_map.json
+outputs/hf_export_deberta-20260206/config.json
+outputs/hf_export_deberta-20260206/base_model/
+```
