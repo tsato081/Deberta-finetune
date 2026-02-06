@@ -9,7 +9,7 @@ from pathlib import Path
 
 import torch
 from dotenv import load_dotenv
-from huggingface_hub import upload_folder
+from huggingface_hub import create_repo, upload_folder
 from safetensors.torch import save_file
 
 
@@ -145,6 +145,7 @@ def main() -> None:
     base_model_dir = Path("models/deberta_v3_mlm")
     shutil.copytree(base_model_dir, export_dir / "base_model", dirs_exist_ok=True)
 
+    create_repo(repo_id=repo_id, repo_type="model", token=token, exist_ok=True)
     upload_folder(
         repo_id=repo_id,
         folder_path=str(export_dir),
