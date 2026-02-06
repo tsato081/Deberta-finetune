@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 from pathlib import Path
 from typing import Dict, List
 
@@ -38,24 +39,54 @@ def find_latest_b_trial(sweep_root: Path) -> tuple[Path, Path, Dict[str, str]]:
     for sweep_dir in sorted(sweep_root.glob("sweep_*"), reverse=True):
         summary_path = sweep_dir / "summary.csv"
         if not summary_path.exists():
-            continue
-        best_row = None
-        best_score = None
-        with open(summary_path, newline="") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                if row.get("stage") != "B":
-                    continue
-                score = float(row["score"])
-                if best_score is None or score > best_score:
-                    best_score = score
-                    best_row = row
-        if best_row is not None:
-            trial_id = int(float(best_row["trial"]))
-            trial_dirs = sorted(sweep_dir.glob(f"trial_{trial_id:02d}_B_*"))
-            if not trial_dirs:
-                return sweep_dir, sweep_dir, best_row
-            return sweep_dir, trial_dirs[0], best_row
+            best_row = None
+        else:
+            best_row = None
+            best_score = None
+            with open(summary_path, newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if row.get("stage") != "B":
+                        continue
+                    score = float(row["score"])
+                    if best_score is None or score > best_score:
+                        best_score = score
+                        best_row = row
+            if best_row is not None:
+                trial_id = int(float(best_row["trial"]))
+                trial_dirs = sorted(sweep_dir.glob(f"trial_{trial_id:02d}_B_*"))
+                if not trial_dirs:
+                    return sweep_dir, sweep_dir, best_row
+                return sweep_dir, trial_dirs[0], best_row
+
+        # Fallback for partial/older runs without usable summary.csv:
+        # select B-best from trial metrics.jsonl directly.
+        trial_best_dir = None
+        trial_best_score = None
+        trial_best_id = None
+        for trial_dir in sorted(sweep_dir.glob("trial_*_B_*")):
+            metrics_path = trial_dir / "metrics.jsonl"
+            if not metrics_path.exists():
+                continue
+            with open(metrics_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    row = json.loads(line)
+                    score = float(row.get("score", 0.0))
+                    if trial_best_score is None or score > trial_best_score:
+                        trial_best_score = score
+                        trial_best_dir = trial_dir
+                        m = re.search(r"trial_(\d+)_B_", trial_dir.name)
+                        trial_best_id = int(m.group(1)) if m else None
+        if trial_best_dir is not None:
+            fallback_row = {
+                "stage": "B",
+                "trial": str(trial_best_id if trial_best_id is not None else ""),
+                "score": str(trial_best_score),
+            }
+            return sweep_dir, trial_best_dir, fallback_row
     raise FileNotFoundError("No sweep with stage B rows found under outputs/train_runs")
 
 
