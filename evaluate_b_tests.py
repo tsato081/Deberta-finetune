@@ -27,6 +27,7 @@ def parse_args() -> argparse.Namespace:
             "Data_for_deberta/tests/Hawks4.0_refactored.csv",
             "Data_for_deberta/tests/Hawks_ver5.0_refactored.csv",
             "Data_for_deberta/tests/Hawks_ver5.1_refactored.csv",
+            "Data_for_deberta/tests/Hawks_ver6.0 csv出力用.csv",
         ],
     )
     parser.add_argument("--output-json", type=Path, default=Path("outputs/test_eval/b_best_fixed_tests.json"))

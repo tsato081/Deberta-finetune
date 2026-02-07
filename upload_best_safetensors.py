@@ -107,7 +107,7 @@ def resolve_label_map_path(sweep_dir: Path, best_trial_dir: Path | None) -> Path
 def main() -> None:
     load_dotenv(".env")
     token = os.environ["HF_TOKEN"]
-    repo_id = "teru00801/deberta-20260206"
+    repo_id = "teru00801/deberta-20260207"
 
     sweep_root = Path("outputs/train_runs")
     sweep_dir = find_latest_b_sweep(sweep_root)
@@ -116,7 +116,7 @@ def main() -> None:
     config_path = resolve_config_path(sweep_dir, best_trial_dir)
     label_map_path = resolve_label_map_path(sweep_dir, best_trial_dir)
 
-    export_dir = Path("outputs/hf_export_deberta-20260206")
+    export_dir = Path("outputs/hf_export_deberta-20260207")
     shutil.rmtree(export_dir, ignore_errors=True)
     export_dir.mkdir(parents=True, exist_ok=True)
 

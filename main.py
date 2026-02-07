@@ -50,9 +50,15 @@ class Config:
     lambda_task2: float = 1.0
     label_smoothing_task1: float = 0.02
     label_smoothing_task2: float = 0.05
+    task2_balance_power: float = 0.5
+    task2_balance_min: float = 0.2
+    task2_balance_max: float = 5.0
 
     title_empty_token: str = "[TITLE_EMPTY]"
     use_amp: bool = True
+    cartography: bool = False
+    cartography_lowmean_q: float = 0.005
+    cartography_task2_per_category_cap: int = 30
 
 
 def parse_args(cfg: Config) -> argparse.Namespace:
@@ -74,9 +80,21 @@ def parse_args(cfg: Config) -> argparse.Namespace:
     parser.add_argument("--boost-mult", type=float, default=cfg.boost_mult)
     parser.add_argument("--focal-gamma-task1", type=float, default=cfg.focal_gamma_task1)
     parser.add_argument("--rdrop-alpha-task2", type=float, default=cfg.rdrop_alpha_task2)
+    parser.add_argument("--task2-balance-power", type=float, default=cfg.task2_balance_power)
+    parser.add_argument("--task2-balance-min", type=float, default=cfg.task2_balance_min)
+    parser.add_argument("--task2-balance-max", type=float, default=cfg.task2_balance_max)
     parser.add_argument("--use-amp", action="store_true")
+    parser.add_argument("--cartography", action="store_true")
+    parser.add_argument("--cartography-lowmean-q", type=float, default=cfg.cartography_lowmean_q)
+    parser.add_argument(
+        "--cartography-task2-per-category-cap",
+        type=int,
+        default=cfg.cartography_task2_per_category_cap,
+    )
     parser.add_argument("--sweep", action="store_true")
     parser.add_argument("--sweep-stage", type=str, default="AB", choices=["A", "B", "AB"])
+    parser.add_argument("--stage-b-lr", type=float, default=None)
+    parser.add_argument("--stage-b-boost", type=float, default=None)
     return parser.parse_args()
 
 
@@ -225,6 +243,7 @@ class MultiTaskDataset(Dataset):
             "labels_t1": torch.tensor(label_t1, dtype=torch.long),
             "labels_t2": torch.tensor(label_t2, dtype=torch.long),
             "is_task1_only": torch.tensor(1 if is_task1_only else 0, dtype=torch.long),
+            "sample_idx": torch.tensor(idx, dtype=torch.long),
         }
 
 
@@ -248,7 +267,13 @@ class DebertaMultiTask(nn.Module):
         return self.head_t1(pooled), self.head_t2(pooled)
 
 
-def build_sampler(df: pd.DataFrame, boost_mult: float) -> WeightedRandomSampler:
+def build_sampler(
+    df: pd.DataFrame,
+    boost_mult: float,
+    task2_balance_power: float,
+    task2_balance_min: float,
+    task2_balance_max: float,
+) -> WeightedRandomSampler:
     pick = df["pick"].fillna("").astype(str)
     cat = df["category"].fillna("").astype(str)
 
@@ -272,8 +297,8 @@ def build_sampler(df: pd.DataFrame, boost_mult: float) -> WeightedRandomSampler:
     def w_cat(c: str) -> float:
         if not c:
             return 1.0
-        raw = (median_cat / max(cat_cnt.get(c, 1), 1)) ** 0.5
-        return float(np.clip(raw, 1.0, 5.0))
+        raw = (median_cat / max(cat_cnt.get(c, 1), 1)) ** task2_balance_power
+        return float(np.clip(raw, task2_balance_min, task2_balance_max))
 
     weights = []
     for p, c in zip(pick, cat):
@@ -317,6 +342,27 @@ def compute_metrics(y_true: List[int], y_pred: List[int]) -> Dict[str, float]:
     }
 
 
+def build_task2_class_weights(
+    train_df: pd.DataFrame,
+    label2id: Dict[str, int],
+    task2_balance_power: float,
+    task2_balance_min: float,
+    task2_balance_max: float,
+) -> torch.Tensor:
+    cat_series = train_df["category"].fillna("").astype(str)
+    cat_series = cat_series[cat_series != ""]
+    cat_cnt = cat_series.value_counts().to_dict()
+    median_cat = float(np.median(list(cat_cnt.values()))) if cat_cnt else 1.0
+
+    weights = torch.ones(len(label2id), dtype=torch.float32)
+    for cat, idx in label2id.items():
+        count = max(cat_cnt.get(cat, 1), 1)
+        raw = (median_cat / count) ** task2_balance_power
+        weight = float(np.clip(raw, task2_balance_min, task2_balance_max))
+        weights[idx] = weight
+    return weights
+
+
 def train_one_epoch(
     model: nn.Module,
     loader: DataLoader,
@@ -324,6 +370,7 @@ def train_one_epoch(
     scheduler,
     device: torch.device,
     cfg: Config,
+    task2_class_weights: torch.Tensor,
     scaler: GradScaler | None,
     epoch: int,
     max_epochs: int,
@@ -357,6 +404,7 @@ def train_one_epoch(
                 loss_t2 = F.cross_entropy(
                     logits_t2[mask_t2],
                     labels_t2[mask_t2],
+                    weight=task2_class_weights,
                     label_smoothing=cfg.label_smoothing_task2,
                 )
 
@@ -365,6 +413,7 @@ def train_one_epoch(
                     loss_t2_b = F.cross_entropy(
                         logits_t2_b[mask_t2],
                         labels_t2[mask_t2],
+                        weight=task2_class_weights,
                         label_smoothing=cfg.label_smoothing_task2,
                     )
                     kl = rdrop_kl(logits_t2[mask_t2], logits_t2_b[mask_t2])
@@ -438,6 +487,170 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> Dict
     }
 
 
+@torch.no_grad()
+def collect_cartography_epoch(model: nn.Module, loader: DataLoader, device: torch.device) -> Dict[str, np.ndarray]:
+    model.eval()
+    n = len(loader.dataset)
+    p_t1 = np.full(n, np.nan, dtype=np.float32)
+    c_t1 = np.full(n, np.nan, dtype=np.float32)
+    p_t2 = np.full(n, np.nan, dtype=np.float32)
+    c_t2 = np.full(n, np.nan, dtype=np.float32)
+
+    for batch in tqdm(loader, desc="cartography", leave=False):
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        labels_t1 = batch["labels_t1"].to(device)
+        labels_t2 = batch["labels_t2"].to(device)
+        sample_idx = batch["sample_idx"].cpu().numpy()
+
+        logits_t1, logits_t2 = model(input_ids, attention_mask)
+        probs_t1 = torch.softmax(logits_t1, dim=-1)
+        probs_t2 = torch.softmax(logits_t2, dim=-1)
+
+        mask_t1 = labels_t1 != -100
+        if mask_t1.any():
+            sid = sample_idx[mask_t1.cpu().numpy()]
+            labels = labels_t1[mask_t1]
+            p = probs_t1[mask_t1].gather(1, labels.unsqueeze(1)).squeeze(1).detach().cpu().numpy()
+            pred = logits_t1[mask_t1].argmax(dim=-1)
+            corr = (pred == labels).float().detach().cpu().numpy()
+            p_t1[sid] = p
+            c_t1[sid] = corr
+
+        mask_t2 = labels_t2 != -100
+        if mask_t2.any():
+            sid = sample_idx[mask_t2.cpu().numpy()]
+            labels = labels_t2[mask_t2]
+            p = probs_t2[mask_t2].gather(1, labels.unsqueeze(1)).squeeze(1).detach().cpu().numpy()
+            pred = logits_t2[mask_t2].argmax(dim=-1)
+            corr = (pred == labels).float().detach().cpu().numpy()
+            p_t2[sid] = p
+            c_t2[sid] = corr
+
+    return {"p_t1": p_t1, "c_t1": c_t1, "p_t2": p_t2, "c_t2": c_t2}
+
+
+def build_cartography_table(
+    train_df: pd.DataFrame,
+    probs: np.ndarray,
+    correct: np.ndarray,
+    valid_mask: np.ndarray,
+) -> pd.DataFrame:
+    seen = np.sum(~np.isnan(probs), axis=0)
+    sum_probs = np.nansum(probs, axis=0)
+    confidence = np.divide(sum_probs, seen, out=np.zeros_like(sum_probs, dtype=np.float32), where=seen > 0)
+
+    centered = probs - confidence[None, :]
+    centered[np.isnan(probs)] = 0.0
+    sq = centered**2
+    variability = np.sqrt(np.divide(np.sum(sq, axis=0), seen, out=np.zeros_like(sum_probs, dtype=np.float32), where=seen > 0))
+
+    sum_correct = np.nansum(correct, axis=0)
+    correctness = np.divide(sum_correct, seen, out=np.zeros_like(sum_correct, dtype=np.float32), where=seen > 0)
+
+    idx = np.where(valid_mask)[0]
+    out = train_df.loc[idx, ["example_id", "title", "body", "pick", "category"]].copy()
+    out["confidence"] = confidence[idx]
+    out["variability"] = variability[idx]
+    out["correctness"] = correctness[idx]
+    out["epochs_seen"] = seen[idx]
+    return out
+
+
+def save_cartography_scatter(df: pd.DataFrame, out_path: Path, title: str) -> bool:
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return False
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sc = ax.scatter(
+        df["variability"].values,
+        df["confidence"].values,
+        c=df["correctness"].values,
+        cmap="viridis",
+        s=8,
+        alpha=0.45,
+    )
+    ax.set_xlabel("Variability")
+    ax.set_ylabel("Confidence")
+    ax.set_title(title)
+    ax.grid(alpha=0.2)
+    fig.colorbar(sc, ax=ax, label="Correctness")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+    return True
+
+
+def save_cartography_outputs(
+    run_dir: Path,
+    train_df: pd.DataFrame,
+    probs_t1_epochs: List[np.ndarray],
+    corr_t1_epochs: List[np.ndarray],
+    probs_t2_epochs: List[np.ndarray],
+    corr_t2_epochs: List[np.ndarray],
+    lowmean_q: float,
+    task2_cap: int,
+) -> None:
+    cartography_dir = run_dir / "cartography"
+    suspects_dir = run_dir / "suspects"
+    cartography_dir.mkdir(parents=True, exist_ok=True)
+    suspects_dir.mkdir(parents=True, exist_ok=True)
+
+    probs_t1 = np.stack(probs_t1_epochs, axis=0)
+    corr_t1 = np.stack(corr_t1_epochs, axis=0)
+    probs_t2 = np.stack(probs_t2_epochs, axis=0)
+    corr_t2 = np.stack(corr_t2_epochs, axis=0)
+
+    task1_valid = train_df["category"].fillna("").astype(str).values == ""
+    task2_valid = train_df["category"].fillna("").astype(str).values != ""
+
+    t1_df = build_cartography_table(train_df, probs_t1, corr_t1, task1_valid)
+    t2_df = build_cartography_table(train_df, probs_t2, corr_t2, task2_valid)
+
+    t1_df.to_csv(cartography_dir / "task1_cartography.csv", index=False)
+    t2_df.to_csv(cartography_dir / "task2_cartography.csv", index=False)
+
+    q = float(np.clip(lowmean_q, 0.0, 1.0))
+    t1_thr = float(t1_df["confidence"].quantile(q))
+    t2_thr = float(t2_df["confidence"].quantile(q))
+
+    t1_suspects = t1_df[t1_df["confidence"] <= t1_thr].sort_values(
+        ["confidence", "variability", "correctness"],
+        ascending=[True, False, True],
+    )
+    t1_suspects.to_csv(suspects_dir / "cartography_task1_lowmean.csv", index=False)
+
+    t2_suspects = t2_df[t2_df["confidence"] <= t2_thr].sort_values(
+        ["category", "confidence", "variability", "correctness"],
+        ascending=[True, True, False, True],
+    )
+    t2_suspects = t2_suspects.groupby("category", as_index=False).head(task2_cap)
+    t2_suspects.to_csv(suspects_dir / "cartography_task2_lowmean.csv", index=False)
+
+    plot_t1 = save_cartography_scatter(t1_df, cartography_dir / "task1_cartography.png", "Task1 Cartography")
+    plot_t2 = save_cartography_scatter(t2_df, cartography_dir / "task2_cartography.png", "Task2 Cartography")
+
+    with open(cartography_dir / "summary.json", "w") as f:
+        json.dump(
+            {
+                "epochs": int(probs_t1.shape[0]),
+                "task1_rows": int(len(t1_df)),
+                "task2_rows": int(len(t2_df)),
+                "task1_lowmean_threshold": t1_thr,
+                "task2_lowmean_threshold": t2_thr,
+                "task1_suspects": int(len(t1_suspects)),
+                "task2_suspects": int(len(t2_suspects)),
+                "task2_per_category_cap": int(task2_cap),
+                "plots_saved": {"task1": plot_t1, "task2": plot_t2},
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+
 def train_and_eval(cfg: Config, run_dir: Path, save_best_path: Path | None = None) -> Dict[str, float]:
     set_seed(cfg.seed)
     if not torch.cuda.is_available():
@@ -457,13 +670,27 @@ def train_and_eval(cfg: Config, run_dir: Path, save_best_path: Path | None = Non
     train_ds = MultiTaskDataset(train_df, tokenizer, cfg.max_length, label2id, cfg.title_empty_token)
     val_ds = MultiTaskDataset(val_df, tokenizer, cfg.max_length, label2id, cfg.title_empty_token)
 
-    sampler = build_sampler(train_df, cfg.boost_mult)
+    sampler = build_sampler(
+        train_df,
+        cfg.boost_mult,
+        cfg.task2_balance_power,
+        cfg.task2_balance_min,
+        cfg.task2_balance_max,
+    )
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, sampler=sampler, num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0)
+    cartography_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0)
 
     model = DebertaMultiTask(str(cfg.model_dir), num_task2=len(label2id))
     model.encoder.resize_token_embeddings(len(tokenizer))
     model.to(device)
+    task2_class_weights = build_task2_class_weights(
+        train_df,
+        label2id,
+        cfg.task2_balance_power,
+        cfg.task2_balance_min,
+        cfg.task2_balance_max,
+    ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
     total_steps = max(len(train_loader) * cfg.max_epochs, 1)
@@ -475,13 +702,23 @@ def train_and_eval(cfg: Config, run_dir: Path, save_best_path: Path | None = Non
     best_score = -1.0
     best_metrics = {}
     patience = 0
+    probs_t1_epochs: List[np.ndarray] = []
+    corr_t1_epochs: List[np.ndarray] = []
+    probs_t2_epochs: List[np.ndarray] = []
+    corr_t2_epochs: List[np.ndarray] = []
 
     metrics_path = run_dir / "metrics.jsonl"
     for epoch in tqdm(range(cfg.max_epochs), desc="epochs"):
         train_loss = train_one_epoch(
-            model, train_loader, optimizer, scheduler, device, cfg, scaler, epoch, cfg.max_epochs
+            model, train_loader, optimizer, scheduler, device, cfg, task2_class_weights, scaler, epoch, cfg.max_epochs
         )
         metrics = evaluate(model, val_loader, device)
+        if cfg.cartography:
+            cartography_epoch = collect_cartography_epoch(model, cartography_loader, device)
+            probs_t1_epochs.append(cartography_epoch["p_t1"])
+            corr_t1_epochs.append(cartography_epoch["c_t1"])
+            probs_t2_epochs.append(cartography_epoch["p_t2"])
+            corr_t2_epochs.append(cartography_epoch["c_t2"])
         task1_acc_for_score = metrics.get("task1_acc_task1only", metrics.get("task1_acc", 0.0))
         score = task1_acc_for_score + metrics.get("task2_acc", 0.0)
 
@@ -517,6 +754,18 @@ def train_and_eval(cfg: Config, run_dir: Path, save_best_path: Path | None = Non
     with open(run_dir / "label_map.json", "w") as f:
         json.dump(label2id, f, ensure_ascii=False, indent=2)
 
+    if cfg.cartography and probs_t1_epochs and probs_t2_epochs:
+        save_cartography_outputs(
+            run_dir=run_dir,
+            train_df=train_df,
+            probs_t1_epochs=probs_t1_epochs,
+            corr_t1_epochs=corr_t1_epochs,
+            probs_t2_epochs=probs_t2_epochs,
+            corr_t2_epochs=corr_t2_epochs,
+            lowmean_q=cfg.cartography_lowmean_q,
+            task2_cap=cfg.cartography_task2_per_category_cap,
+        )
+
     return best_metrics
 
 
@@ -529,7 +778,12 @@ def run_single(cfg: Config) -> None:
     train_and_eval(cfg, run_dir)
 
 
-def run_sweep(cfg: Config, sweep_stage: str) -> None:
+def run_sweep(
+    cfg: Config,
+    sweep_stage: str,
+    stage_b_lr: float | None = None,
+    stage_b_boost: float | None = None,
+) -> None:
     sweep_dir = cfg.output_dir / f"sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     sweep_dir.mkdir(parents=True, exist_ok=True)
 
@@ -583,30 +837,36 @@ def run_sweep(cfg: Config, sweep_stage: str) -> None:
 
     if sweep_stage in {"B", "AB"}:
         if best_a is None:
+            if (stage_b_lr is None) ^ (stage_b_boost is None):
+                raise ValueError("--stage-b-lr and --stage-b-boost must be specified together.")
+            if (stage_b_lr is not None) and (stage_b_boost is not None):
+                best_a = {"lr": stage_b_lr, "boost": stage_b_boost, "score": None}
+
             latest = None
-            for prev in sorted(cfg.output_dir.glob("sweep_*"), reverse=True):
-                if prev == sweep_dir:
-                    continue
-                summary = prev / "summary.csv"
-                if not summary.exists():
-                    continue
-                with open(summary) as f:
-                    header = f.readline().strip().split(",")
-                    if "stage" not in header or "learning_rate" not in header or "boost_mult" not in header or "score" not in header:
+            if best_a is None:
+                for prev in sorted(cfg.output_dir.glob("sweep_*"), reverse=True):
+                    if prev == sweep_dir:
                         continue
-                    idx = {k: i for i, k in enumerate(header)}
-                    for line in f:
-                        parts = line.strip().split(",")
-                        if not parts or parts[idx["stage"]] != "A":
+                    summary = prev / "summary.csv"
+                    if not summary.exists():
+                        continue
+                    with open(summary) as f:
+                        header = f.readline().strip().split(",")
+                        if "stage" not in header or "learning_rate" not in header or "boost_mult" not in header or "score" not in header:
                             continue
-                        score = float(parts[idx["score"]])
-                        lr = float(parts[idx["learning_rate"]])
-                        boost = float(parts[idx["boost_mult"]])
-                        if (latest is None) or (score > latest["score"]):
-                            latest = {"lr": lr, "boost": boost, "score": score}
-                if latest is not None:
-                    break
-            best_a = latest or {"lr": cfg.learning_rate, "boost": cfg.boost_mult, "score": None}
+                        idx = {k: i for i, k in enumerate(header)}
+                        for line in f:
+                            parts = line.strip().split(",")
+                            if not parts or parts[idx["stage"]] != "A":
+                                continue
+                            score = float(parts[idx["score"]])
+                            lr = float(parts[idx["learning_rate"]])
+                            boost = float(parts[idx["boost_mult"]])
+                            if (latest is None) or (score > latest["score"]):
+                                latest = {"lr": lr, "boost": boost, "score": score}
+                    if latest is not None:
+                        break
+                best_a = latest or {"lr": cfg.learning_rate, "boost": cfg.boost_mult, "score": None}
 
         for gamma in stage_b_gamma:
             for rdrop in stage_b_rdrop:
@@ -660,10 +920,16 @@ def main() -> None:
     cfg.boost_mult = args.boost_mult
     cfg.focal_gamma_task1 = args.focal_gamma_task1
     cfg.rdrop_alpha_task2 = args.rdrop_alpha_task2
+    cfg.task2_balance_power = args.task2_balance_power
+    cfg.task2_balance_min = args.task2_balance_min
+    cfg.task2_balance_max = args.task2_balance_max
     cfg.use_amp = args.use_amp or cfg.use_amp
+    cfg.cartography = args.cartography
+    cfg.cartography_lowmean_q = args.cartography_lowmean_q
+    cfg.cartography_task2_per_category_cap = args.cartography_task2_per_category_cap
 
     if args.sweep:
-        run_sweep(cfg, args.sweep_stage)
+        run_sweep(cfg, args.sweep_stage, stage_b_lr=args.stage_b_lr, stage_b_boost=args.stage_b_boost)
     else:
         run_single(cfg)
 
