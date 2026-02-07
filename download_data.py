@@ -14,6 +14,7 @@ files = {
     "tests/Hawks4.0_refactored.csv": "Data_for_deberta/tests/Hawks4.0_refactored.csv",
     "tests/Hawks_ver5.0_refactored.csv": "Data_for_deberta/tests/Hawks_ver5.0_refactored.csv",
     "tests/Hawks_ver5.1_refactored.csv": "Data_for_deberta/tests/Hawks_ver5.1_refactored.csv",
+    "tests/Hawks_ver6.0 csv出力用.csv": "Data_for_deberta/tests/Hawks_ver6.0 csv出力用.csv",
 }
 
 for src, dst in files.items():
@@ -23,4 +24,3 @@ for src, dst in files.items():
     shutil.copyfile(downloaded, dst_path)
 
 print("done: dataset files")
-
