@@ -149,6 +149,22 @@ uv run python main.py --sweep --sweep-stage B
 ```
 ※ Stage Aを途中で止めても、`summary.csv`内のAベストを自動で拾ってBに入る
 
+Stage Bのみ（クラウド再作成後: Aベスト手動指定 + Cartography）:
+```bash
+uv run python main.py \
+  --model-dir models/deberta_v3_mlm \
+  --task1-csv Data_for_deberta/processed/task1_ready/train.csv \
+  --task2-csv Data_for_deberta/processed/task2_ready/train.csv \
+  --output-dir outputs/train_runs \
+  --sweep \
+  --sweep-stage B \
+  --stage-b-lr 1.5e-5 \
+  --stage-b-boost 1.0 \
+  --cartography \
+  --cartography-lowmean-q 0.005 \
+  --cartography-task2-per-category-cap 30
+```
+
 ### 6) エクスポート後ファイルの意味（`upload_best_safetensors.py`）
 
 エクスポート先:
