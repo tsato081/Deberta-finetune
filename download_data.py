@@ -15,6 +15,8 @@ files = {
     "tests/Hawks_ver5.0_refactored.csv": "Data_for_deberta/tests/Hawks_ver5.0_refactored.csv",
     "tests/Hawks_ver5.1_refactored.csv": "Data_for_deberta/tests/Hawks_ver5.1_refactored.csv",
     "tests/Hawks_ver6.0 csv出力用.csv": "Data_for_deberta/tests/Hawks_ver6.0 csv出力用.csv",
+    "risk-only-pick/task1_risk_training_0209.csv": "data_for_deberta/Risk-only-pick/task1_risk_training_0209.csv",
+    "risk-only-pick/Hawks_ver6.0 csv出力用_pickflip.csv": "data_for_deberta/Risk-only-pick/Hawks_ver6.0 csv出力用_pickflip.csv",
 }
 
 for src, dst in files.items():

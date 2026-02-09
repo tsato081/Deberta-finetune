@@ -111,6 +111,12 @@ ls -la models/deberta_v3_mlm | head
 uv run python download_data.py
 ```
 
+上記で `Risk-only-pick` も取得される（`main_task1_binary.py` 用）:
+```bash
+data_for_deberta/Risk-only-pick/task1_risk_training_0209.csv
+data_for_deberta/Risk-only-pick/Hawks_ver6.0 csv出力用_pickflip.csv
+```
+
 #### B) ローカル生成は省略（クラウドは `download_data.py` のみでOK）
 
 ### 5) 学習（単発 / sweep）
