@@ -15,6 +15,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from safetensors.torch import load_file as load_safetensors
 from safetensors.torch import save_file as save_safetensors
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from torch.amp import GradScaler, autocast
@@ -76,6 +77,9 @@ def parse_args(cfg: Config) -> argparse.Namespace:
     parser.add_argument("--cartography", dest="cartography", action="store_true", default=cfg.cartography)
     parser.add_argument("--no-cartography", dest="cartography", action="store_false")
     parser.add_argument("--cartography-lowmean-q", type=float, default=cfg.cartography_lowmean_q)
+    parser.add_argument("--eval-only", action="store_true")
+    parser.add_argument("--eval-run-dir", type=str, default="")
+    parser.add_argument("--eval-model-path", type=str, default="")
     return parser.parse_args()
 
 
@@ -445,6 +449,104 @@ def save_cartography_outputs(
         )
 
 
+def resolve_eval_run_dir(output_dir: Path, eval_run_dir: Path | None) -> Path:
+    if eval_run_dir is not None:
+        return eval_run_dir
+    candidates = [path for path in output_dir.iterdir() if path.is_dir()]
+    candidates = sorted(candidates, key=lambda path: path.name, reverse=True)
+    for path in candidates:
+        if (path / "best_model.pt").exists() or (path / "best_model.safetensors").exists():
+            return path
+    raise FileNotFoundError(f"No run directory with best_model found under: {output_dir}")
+
+
+def resolve_eval_model_path(run_dir: Path, eval_model_path: Path | None) -> Path:
+    if eval_model_path is not None:
+        return eval_model_path
+    pt_path = run_dir / "best_model.pt"
+    if pt_path.exists():
+        return pt_path
+    safe_path = run_dir / "best_model.safetensors"
+    if safe_path.exists():
+        return safe_path
+    raise FileNotFoundError(f"No best model found in run dir: {run_dir}")
+
+
+def load_state_dict(model_path: Path) -> Dict[str, torch.Tensor]:
+    if model_path.suffix == ".safetensors":
+        return load_safetensors(str(model_path))
+    state = torch.load(model_path, map_location="cpu")
+    if isinstance(state, dict):
+        return state
+    raise RuntimeError(f"Unsupported checkpoint format: {model_path}")
+
+
+def run_eval_only(cfg: Config, eval_run_dir: Path | None, eval_model_path: Path | None) -> None:
+    set_seed(cfg.seed)
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required (expected A100/H100).")
+    device = torch.device("cuda")
+
+    cfg.output_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = resolve_eval_run_dir(cfg.output_dir, eval_run_dir)
+    model_path = resolve_eval_model_path(run_dir, eval_model_path)
+
+    run_cfg_path = run_dir / "config.json"
+    if run_cfg_path.exists():
+        with open(run_cfg_path) as f:
+            run_cfg = json.load(f)
+        if "model_dir" in run_cfg:
+            cfg.model_dir = Path(run_cfg["model_dir"])
+        if "max_length" in run_cfg:
+            cfg.max_length = int(run_cfg["max_length"])
+        if "title_empty_token" in run_cfg:
+            cfg.title_empty_token = str(run_cfg["title_empty_token"])
+
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model_dir)
+    tokenizer.add_special_tokens({"additional_special_tokens": [cfg.title_empty_token]})
+    final_raw_df = pd.read_csv(cfg.final_eval_csv)
+    final_df = load_task1_binary(cfg.final_eval_csv)
+    final_ds = Task1Dataset(final_df, tokenizer, cfg.max_length, cfg.title_empty_token)
+    final_loader = DataLoader(final_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0)
+
+    model = DebertaTask1Binary(str(cfg.model_dir))
+    model.encoder.resize_token_embeddings(len(tokenizer))
+    model.load_state_dict(load_state_dict(model_path), strict=True)
+    model.to(device)
+
+    final_pred = predict(model, final_loader, device)
+    final_metrics = compute_metrics(final_pred["labels"], final_pred["preds"])
+    baseline_always_pick = float(np.mean(np.array(final_pred["labels"]) == 1)) if final_pred["labels"] else 0.0
+    baseline_always_decline = float(np.mean(np.array(final_pred["labels"]) == 0)) if final_pred["labels"] else 0.0
+
+    final_out = build_final_eval_output(final_raw_df, final_df, final_pred)
+    pred_out = run_dir / "final_eval_predictions_evalonly.csv"
+    sum_out = run_dir / "final_eval_summary_evalonly.csv"
+    final_out.to_csv(pred_out, index=False)
+
+    pd.DataFrame(
+        [
+            {
+                "run_dir": str(run_dir),
+                "model_path": str(model_path),
+                "dataset": str(cfg.final_eval_csv),
+                "rows_raw": int(len(final_raw_df)),
+                "rows_evaluated": int(len(final_pred["labels"])),
+                "acc": final_metrics["acc"],
+                "f1": final_metrics["f1"],
+                "precision": final_metrics["precision"],
+                "recall": final_metrics["recall"],
+                "always_pick_acc": baseline_always_pick,
+                "always_decline_acc": baseline_always_decline,
+            }
+        ]
+    ).to_csv(sum_out, index=False)
+
+    print("Saved:")
+    print(f"  {pred_out}")
+    print(f"  {sum_out}")
+
+
 def run(cfg: Config) -> None:
     set_seed(cfg.seed)
     if not torch.cuda.is_available():
@@ -640,6 +742,12 @@ def main() -> None:
         cfg.use_amp = False
     cfg.cartography = args.cartography
     cfg.cartography_lowmean_q = args.cartography_lowmean_q
+
+    eval_run_dir = Path(args.eval_run_dir) if args.eval_run_dir else None
+    eval_model_path = Path(args.eval_model_path) if args.eval_model_path else None
+    if args.eval_only:
+        run_eval_only(cfg, eval_run_dir=eval_run_dir, eval_model_path=eval_model_path)
+        return
 
     run(cfg)
 

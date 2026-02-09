@@ -176,10 +176,27 @@ Task1のみ（二値分類, Risk-only-pick）:
 uv run python main_task1_binary.py
 ```
 
+Task1の評価だけ（最新runの `best_model.pt` を自動使用）:
+```bash
+uv run python main_task1_binary.py \
+  --eval-only \
+  --final-eval-csv "data_for_deberta/Risk-only-pick/Hawks_ver6.0 csv出力用_pickflip.csv"
+```
+
+Task1の評価だけ（runを明示）:
+```bash
+uv run python main_task1_binary.py \
+  --eval-only \
+  --eval-run-dir outputs/task1_binary_runs/20260209_103015 \
+  --final-eval-csv "data_for_deberta/Risk-only-pick/Hawks_ver6.0 csv出力用_pickflip.csv"
+```
+
 出力:
 ```bash
 outputs/task1_binary_runs/<timestamp>/final_eval_predictions.csv
 outputs/task1_binary_runs/<timestamp>/final_eval_summary.csv
+outputs/task1_binary_runs/<run_timestamp>/final_eval_predictions_evalonly.csv
+outputs/task1_binary_runs/<run_timestamp>/final_eval_summary_evalonly.csv
 ```
 
 ### 6) エクスポート後ファイルの意味（`upload_best_safetensors.py`）
