@@ -151,9 +151,15 @@ def load_task1_eval_rows(path: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
     view["_title_norm"] = view[title_col].map(normalize_text)
     view["_body_norm"] = view[body_col].map(normalize_text)
     view["_pick_norm"] = view["pick"].map(normalize_pick_label)
-    eval_df = view[view["_pick_norm"].isin(["Decline", "Pick"])].copy()
-    eval_df = eval_df.rename(columns={"_title_norm": "title", "_body_norm": "body", "_pick_norm": "pick", "_row_id": "row_id"})
-    eval_df = eval_df[["row_id", "title", "body", "pick"]].reset_index(drop=True)
+    eval_df = pd.DataFrame(
+        {
+            "row_id": view["_row_id"],
+            "title": view["_title_norm"],
+            "body": view["_body_norm"],
+            "pick": view["_pick_norm"],
+        }
+    )
+    eval_df = eval_df[eval_df["pick"].isin(["Decline", "Pick"])].reset_index(drop=True)
     return raw, eval_df
 
 
