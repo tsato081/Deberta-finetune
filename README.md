@@ -165,6 +165,17 @@ uv run python main.py \
   --cartography-task2-per-category-cap 30
 ```
 
+Task1のみ（二値分類, Risk-only-pick）:
+```bash
+uv run python main_task1_binary.py
+```
+
+出力:
+```bash
+outputs/task1_binary_runs/<timestamp>/final_eval_predictions.csv
+outputs/task1_binary_runs/<timestamp>/final_eval_summary.csv
+```
+
 ### 6) エクスポート後ファイルの意味（`upload_best_safetensors.py`）
 
 エクスポート先:
