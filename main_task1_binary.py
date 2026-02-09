@@ -135,29 +135,42 @@ def load_task1_binary(path: Path) -> pd.DataFrame:
     return grouped
 
 
-def build_final_eval_output(
+def resolve_text_columns(df: pd.DataFrame) -> Tuple[str, str]:
+    title_col = "title" if "title" in df.columns else "title_original"
+    body_col = "body" if "body" in df.columns else "body_original"
+    if title_col not in df.columns or body_col not in df.columns:
+        raise KeyError("CSV must include title/body or title_original/body_original columns")
+    return title_col, body_col
+
+
+def load_task1_eval_rows(path: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    raw = pd.read_csv(path)
+    title_col, body_col = resolve_text_columns(raw)
+    view = raw.copy()
+    view["_row_id"] = np.arange(len(view))
+    view["_title_norm"] = view[title_col].map(normalize_text)
+    view["_body_norm"] = view[body_col].map(normalize_text)
+    view["_pick_norm"] = view["pick"].map(normalize_pick_label)
+    eval_df = view[view["_pick_norm"].isin(["Decline", "Pick"])].copy()
+    eval_df = eval_df.rename(columns={"_title_norm": "title", "_body_norm": "body", "_pick_norm": "pick", "_row_id": "row_id"})
+    eval_df = eval_df[["row_id", "title", "body", "pick"]].reset_index(drop=True)
+    return raw, eval_df
+
+
+def build_final_eval_output_rows(
     raw_eval_df: pd.DataFrame,
     eval_df: pd.DataFrame,
     eval_pred: Dict[str, List[float] | List[int]],
 ) -> pd.DataFrame:
-    title_col = "title" if "title" in raw_eval_df.columns else "title_original"
-    body_col = "body" if "body" in raw_eval_df.columns else "body_original"
-    if title_col not in raw_eval_df.columns or body_col not in raw_eval_df.columns:
-        raise KeyError("final_eval_csv must include title/body (or title_original/body_original) columns")
-
-    view = raw_eval_df.copy()
-    view["_title_norm"] = view[title_col].map(normalize_text)
-    view["_body_norm"] = view[body_col].map(normalize_text)
-    view["example_id"] = [example_id(title, body) for title, body in zip(view["_title_norm"], view["_body_norm"])]
-    view = view.drop_duplicates(subset=["example_id"], keep="first")
-
-    pred_df = eval_df[["example_id"]].copy()
-    pred_df["pick_true"] = ["Pick" if label == 1 else "Decline" for label in eval_pred["labels"]]
-    pred_df["pick_pred"] = ["Pick" if pred == 1 else "Decline" for pred in eval_pred["preds"]]
-    pred_df["pick_prob"] = eval_pred["prob_pick"]
-
-    out = view.merge(pred_df, on="example_id", how="inner")
-    return out.drop(columns=["_title_norm", "_body_norm"])
+    out = raw_eval_df.copy()
+    out["pick_true"] = pd.NA
+    out["pick_pred"] = pd.NA
+    out["pick_prob"] = np.nan
+    row_ids = eval_df["row_id"].to_numpy()
+    out.loc[row_ids, "pick_true"] = ["Pick" if label == 1 else "Decline" for label in eval_pred["labels"]]
+    out.loc[row_ids, "pick_pred"] = ["Pick" if pred == 1 else "Decline" for pred in eval_pred["preds"]]
+    out.loc[row_ids, "pick_prob"] = eval_pred["prob_pick"]
+    return out
 
 
 def split_train_val(df: pd.DataFrame, val_ratio: float, seed: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -504,9 +517,8 @@ def run_eval_only(cfg: Config, eval_run_dir: Path | None, eval_model_path: Path 
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_dir)
     tokenizer.add_special_tokens({"additional_special_tokens": [cfg.title_empty_token]})
-    final_raw_df = pd.read_csv(cfg.final_eval_csv)
-    final_df = load_task1_binary(cfg.final_eval_csv)
-    final_ds = Task1Dataset(final_df, tokenizer, cfg.max_length, cfg.title_empty_token)
+    final_raw_df, final_eval_df = load_task1_eval_rows(cfg.final_eval_csv)
+    final_ds = Task1Dataset(final_eval_df[["title", "body", "pick"]], tokenizer, cfg.max_length, cfg.title_empty_token)
     final_loader = DataLoader(final_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0)
 
     model = DebertaTask1Binary(str(cfg.model_dir))
@@ -519,7 +531,7 @@ def run_eval_only(cfg: Config, eval_run_dir: Path | None, eval_model_path: Path 
     baseline_always_pick = float(np.mean(np.array(final_pred["labels"]) == 1)) if final_pred["labels"] else 0.0
     baseline_always_decline = float(np.mean(np.array(final_pred["labels"]) == 0)) if final_pred["labels"] else 0.0
 
-    final_out = build_final_eval_output(final_raw_df, final_df, final_pred)
+    final_out = build_final_eval_output_rows(final_raw_df, final_eval_df, final_pred)
     pred_out = run_dir / "final_eval_predictions_evalonly.csv"
     sum_out = run_dir / "final_eval_summary_evalonly.csv"
     final_out.to_csv(pred_out, index=False)
@@ -562,15 +574,14 @@ def run(cfg: Config) -> None:
 
     train_all_df = load_task1_binary(cfg.train_csv)
     train_df, val_df = split_train_val(train_all_df, cfg.val_ratio, cfg.seed)
-    final_raw_df = pd.read_csv(cfg.final_eval_csv)
-    final_df = load_task1_binary(cfg.final_eval_csv)
+    final_raw_df, final_eval_df = load_task1_eval_rows(cfg.final_eval_csv)
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_dir)
     tokenizer.add_special_tokens({"additional_special_tokens": [cfg.title_empty_token]})
 
     train_ds = Task1Dataset(train_df, tokenizer, cfg.max_length, cfg.title_empty_token)
     val_ds = Task1Dataset(val_df, tokenizer, cfg.max_length, cfg.title_empty_token)
-    final_ds = Task1Dataset(final_df, tokenizer, cfg.max_length, cfg.title_empty_token)
+    final_ds = Task1Dataset(final_eval_df[["title", "body", "pick"]], tokenizer, cfg.max_length, cfg.title_empty_token)
 
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, sampler=build_sampler(train_df), num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0)
@@ -655,7 +666,7 @@ def run(cfg: Config) -> None:
     final_pred = predict(model, final_loader, device)
     final_metrics = compute_metrics(final_pred["labels"], final_pred["preds"])
 
-    final_out = build_final_eval_output(final_raw_df, final_df, final_pred)
+    final_out = build_final_eval_output_rows(final_raw_df, final_eval_df, final_pred)
     final_out.to_csv(run_dir / "final_eval_predictions.csv", index=False)
 
     if cfg.cartography and probs_epochs:
@@ -680,7 +691,7 @@ def run(cfg: Config) -> None:
                 "best_score": best_score,
                 "train_rows": int(len(train_df)),
                 "val_rows": int(len(val_df)),
-                "final_eval_rows": int(len(final_df)),
+                "final_eval_rows": int(len(final_eval_df)),
                 "val_metrics": val_metrics,
                 "final_eval_metrics": final_metrics,
                 "final_eval_baseline": {
