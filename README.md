@@ -191,12 +191,45 @@ uv run python main_task1_binary.py \
   --final-eval-csv "data_for_deberta/Risk-only-pick/Hawks_ver6.0 csv出力用_pickflip.csv"
 ```
 
+Task2のみ（カテゴリ分類専用 / HF dataset: `teru00801/data-plus-high-prob`）:
+```bash
+uv run python main_task2_category.py \
+  --model-id teru00801/deberta-v3-mlm \
+  --hf-dataset-repo teru00801/data-plus-high-prob \
+  --hf-filename all_categories_merged.csv \
+  --output-dir outputs/task2_category_runs
+```
+
+Task2の評価だけ（最新runの best_model を自動使用）:
+```bash
+uv run python main_task2_category.py --eval-only
+```
+
+Task2の評価だけ（runを明示）:
+```bash
+uv run python main_task2_category.py \
+  --eval-only \
+  --eval-run-dir outputs/task2_category_runs/<timestamp>
+```
+
+Task2スクリプトの構文チェック:
+```bash
+uv run python -m py_compile main_task2_category.py
+```
+
 出力:
 ```bash
 outputs/task1_binary_runs/<timestamp>/final_eval_predictions.csv
 outputs/task1_binary_runs/<timestamp>/final_eval_summary.csv
 outputs/task1_binary_runs/<run_timestamp>/final_eval_predictions_evalonly.csv
 outputs/task1_binary_runs/<run_timestamp>/final_eval_summary_evalonly.csv
+outputs/task2_category_runs/<timestamp>/summary.json
+outputs/task2_category_runs/<timestamp>/test_eval_summary.json
+outputs/task2_category_runs/<timestamp>/test_eval_summary.csv
+outputs/task2_category_runs/<timestamp>/test_predictions_<test_id>.csv
+outputs/task2_category_runs/<timestamp>/confusion_matrix_<test_id>.csv
+outputs/task2_category_runs/<run_timestamp>/test_eval_summary_evalonly.json
+outputs/task2_category_runs/<run_timestamp>/test_eval_summary_evalonly.csv
 ```
 
 ### 6) エクスポート後ファイルの意味（`upload_best_safetensors.py`）
